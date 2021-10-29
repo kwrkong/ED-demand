@@ -1,0 +1,211 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+Data source:
+Hospital data: https://data.gov.au/
+Weather data: https://www.noaa.gov/
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, warning = FALSE, comment = FALSE, error = FALSE, message = FALSE)
+library(rnoaa)
+library(tidyverse)
+library(lubridate)
+```
+
+Download daily temperature and precipitation data for the region during the relevant time period.
+```{r obtain noaa data}
+options(noaakey = "RnIlpufqubcOqyUzRdyPkMaygSjmSJUP")
+perth_data_1 <- ncdc(
+  datasetid = 'GHCND',
+  stationid = 'GHCND:ASN00009021',
+  startdate = '2013-07-01',
+  enddate = '2014-06-30',
+  limit = 1000
+)$data
+perth_data_2 <- ncdc(
+  datasetid = 'GHCND',
+  stationid = 'GHCND:ASN00009021',
+  startdate = '2013-07-01',
+  enddate = '2014-06-30',
+  offset = 1000,
+  limit = 1000
+)$data
+perth_data <- rbind(perth_data_1, perth_data_2)
+```
+
+
+The final model will be used to see in what extent the demand in ED is relevant to the weather in that area.The ED demand is expected to be affected by the weather. Bad weather will discourage patients from attending a hospital while good weather will have the opposite effect.Potential users of this model includes hospital administration people and potential patients.
+
+Predicting relationship between tempature, precipitation and ED demand using linear regression.
+```{r hospital data}
+ed_data_link <- 'C:/Users/kwr/Desktop/kwr/741/a1/govhack3.csv'
+top_row <- read_csv(ed_data_link, col_names = FALSE, n_max = 1)
+second_row <- read_csv(ed_data_link, n_max = 1)
+
+column_names <- second_row %>% 
+  unlist(., use.names=FALSE) %>% 
+  make.unique(., sep = "__") # double underscore
+
+column_names[2:8] <- str_c(column_names[2:8], '0', sep='__')
+
+daily_attendance <- 
+  read_csv(ed_data_link, skip = 2, col_names = column_names)
+(
+  facilities <- top_row %>% 
+    unlist(., use.names=FALSE) %>% 
+    na.omit()
+  )
+daily_attendance <- daily_attendance %>% 
+  gather(key = index, 
+         value = value, 
+         -Date) 
+
+daily_attendance <- daily_attendance %>% 
+  separate(index, 
+           into = c("index", 
+                    "facility_id"), 
+           sep="__", 
+           remove=TRUE) %>% 
+  mutate(facility_id = 
+           as.numeric(facility_id) + 1) %>% 
+  mutate(facility_name = 
+           facilities[facility_id]) %>% 
+  select(Date, 
+         facility_name, 
+         index, 
+         value)
+
+## Replacing N/A with 0 - bare minimum.
+# more complex analysis for higher grades.
+
+daily_attendance <- daily_attendance %>% 
+  mutate(value = 
+           as.numeric(value)) %>% 
+  replace_na(replace = 
+               list(value = 0)) 
+
+
+daily_attendance <- daily_attendance %>% 
+  spread(index, 
+         value)
+
+write_rds(daily_attendance, "perth_ed_data.rds")
+daily_attendance <- daily_attendance %>% 
+  mutate(Date = dmy(Date))
+
+```
+
+In this case, we use Royal Perth Hospital as an example as it is close to the data station(PERTH AIRPORT) we picked.
+
+```{r select hospital}
+selected_hospital <- 'Royal Perth Hospital'
+
+one_hospital <- daily_attendance %>%
+  filter(facility_name == selected_hospital) %>% 
+  select(-facility_name) %>% 
+  arrange(Date)
+
+one_hospital %>% 
+  summarise(total_admission = sum(Admissions), 
+            total_attendance = sum(Attendance))
+```
+
+
+Fit a linear model for Y using date as the predictor variable. Plot the fitted values and the residuals and assess the model fit. 
+In this case, it is obvious that linear function is not sufficient for modelling the trend of Y as shown in the plot.
+
+```{r}
+#change date format
+perth_data$date = perth_data$date %>% ymd_hms()
+#take precipitation
+perth_prcp = perth_data[perth_data$datatype == 'PRCP',]
+perth_prcp <- rename(perth_prcp, prcp = value)
+perth_prcp <- perth_prcp[c('date','prcp')]
+#take temperature
+perth_tavg = perth_data[perth_data$datatype == 'TAVG',]
+perth_tavg <- rename(perth_tavg, tavg = value)
+perth_tavg <- perth_tavg[c('date','tavg')]
+#combain data frames
+perth_cdata <- left_join(one_hospital, perth_prcp, by = c('Date' = 'date'))
+perth_cdata <- left_join(perth_cdata, perth_tavg, by = c('Date' = 'date'))
+fit <- lm(Attendance ~ prcp + tavg, data = perth_cdata)
+summary(fit)
+plot(perth_cdata$Date, fit$fitted.values)
+plot(perth_cdata$Date, fit$residuals)
+
+```
+Relax the linearity assumption by fitting a generalised additive model (GAM)and assess the model. There is a vague pattern in residuals.
+
+```{r}
+library(mgcv)   ## load the package
+ct1 <- gam(Attendance ~ s(prcp)+s(tavg),
+           data=perth_cdata)
+ct1
+gam.check(ct1)
+```
+Augment the model to incorporate the weekly variations.
+
+```{r}
+ct2 <- gam(Attendance ~ s(prcp)+s(tavg)+weekdays(Date),
+           data=perth_cdata)
+summary(ct2)
+gam.check(ct2)
+```
+Compare the models using the Akaike information criterion (AIC) and report the best-fitted model through coefficient estimates and/or plots.
+```{r}
+AIC(ct1, ct2)
+plot(ct2)
+summary(ct2)
+```
+There appears to be no pattern among the residuals.
+
+```{r}
+plot(ct2$residuals)
+```
+
+Task 4
+EHF is a measuring factor based on the three-day-averaged daily mean temperature.
+Now we are going to use the NOAA data to calculate the daily EHF values for the Perth area during the relevant time period and plot the daily EHF values. 
+```{r}
+perth_cdata$tavg_lag_1 <- perth_cdata$tavg %>% lag()
+perth_cdata$tavg_lag_2 <- perth_cdata$tavg_lag_1 %>% lag()
+perth_cdata$ehf <- (perth_cdata$tavg + perth_cdata$tavg_lag_1 + perth_cdata$tavg_lag_2)/3
+plot(perth_cdata$Date, perth_cdata$ehf)
+```
+Now we are going to use the EHF as an additional predictor to augment the models fitted before. We can see that the extra predictoer improved the model fit slightly. The ehf has no significant effect on ed demand.
+
+```{r}
+ct3 <- gam(Attendance ~ s(prcp)+s(tavg)+weekdays(Date)+s(ehf),
+           data=perth_cdata)
+AIC(ct2,ct3)
+```
+
+Now we are going to try another feature and see if it is more predictive of ED demand, that is The gap between highest temperature and lowest temperature.
+The result shows that this feature does not improve the model fit as the AIC score increased.
+
+```{r}
+#take highest temperature
+perth_tmax = perth_data[perth_data$datatype == 'TMAX',]
+perth_tmax <- rename(perth_tmax, tmax = value)
+perth_tmax <- perth_tmax[c('date','tmax')]
+#take lowest temperature
+perth_tmin = perth_data[perth_data$datatype == 'TMIN',]
+perth_tmin <- rename(perth_tmin, tmin = value)
+perth_tmin <- perth_tmin[c('date','tmin')]
+#combain data frames
+perth_cdata <- left_join(perth_cdata, perth_tmax, by = c('Date' = 'date'))
+perth_cdata <- left_join(perth_cdata, perth_tmin, by = c('Date' = 'date'))
+#calculate temperature gap
+perth_cdata$tgap <- perth_cdata$tmax - perth_cdata$tmin
+
+ct4 <- gam(Attendance ~ s(prcp)+s(tavg)+weekdays(Date)+s(ehf)+s(tgap),
+           data=perth_cdata)
+AIC(ct3,ct4)
+```
+
